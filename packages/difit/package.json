@@ -54,7 +54,6 @@
     "knip": "knip --use-tsconfig-files",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepare": "lefthook install",
     "prepublishOnly": "NODE_ENV=production pnpm run build",
     "perf": "node scripts/measure-performance.js",
     "perf:small": "node scripts/measure-performance.js --size small",

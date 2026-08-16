@@ -16,6 +16,9 @@ importers:
       '@parcel/watcher':
         specifier: ^2.5.1
         version: 2.6.0
+      '@revu/plan-schema':
+        specifier: workspace:*
+        version: link:../plan-schema
       commander:
         specifier: ^15.0.0
         version: 15.0.0

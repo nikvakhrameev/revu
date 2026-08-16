@@ -90,6 +90,8 @@ interface CliOptions {
   background?: boolean;
   context?: number;
   mergeBase?: boolean;
+  managed?: boolean;
+  taskKey?: string;
 }
 
 const program = new Command();
@@ -128,6 +130,8 @@ program
     '--merge-base',
     'resolve the base revision with git merge-base before diffing (Git revision mode only)',
   )
+  .option('--managed', 'run as a wrapper-managed instance (fixed port, external comment authority)')
+  .option('--task-key <key>', 'opaque task key reported via /api/instance-info (managed mode)')
   .action(async (commitish: string, compareWith: string | undefined, options: CliOptions) => {
     try {
       const isBackgroundChild = process.env[BACKGROUND_CHILD_ENV] === '1';
@@ -295,8 +299,11 @@ program
         clearComments: options.clean,
         keepAlive: options.keepAlive,
         contextLines: options.context,
-        diffMode: determineDiffMode(selection, compareWith),
+        // Managed instances always review a fixed pair of SHAs: no file watching.
+        diffMode: options.managed ? DiffMode.SPECIFIC : determineDiffMode(selection, compareWith),
         repoPath,
+        managed: options.managed,
+        taskKey: options.taskKey,
         ...(commentImports.length > 0 ? { commentImports } : {}),
       });
 

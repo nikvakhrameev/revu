@@ -27,6 +27,7 @@ import { getFileExtension } from '../utils/fileUtils.js';
 
 import { FileWatcherService } from './file-watcher.js';
 import { GitDiffParser } from './git-diff.js';
+import { registerManagedRoutes } from './managed.js';
 import { parseUserSettingsPatch, readUserConfig, updateUserClientSettings } from './user-config.js';
 
 import {
@@ -59,6 +60,8 @@ interface ServerOptions {
   diffMode?: DiffMode;
   repoPath?: string;
   contextLines?: number;
+  managed?: boolean;
+  taskKey?: string;
 }
 
 const GENERATED_STATUS_CACHE_TTL_MS = 60_000;
@@ -364,6 +367,7 @@ export async function startServer(
       requestedBaseMode,
       clearComments: options.clearComments,
       repositoryId,
+      managed: options.managed || undefined,
       commentImports: shouldIncludeCommentImports ? initialCommentImports : undefined,
       commentImportId: shouldIncludeCommentImports ? commentImportId : undefined,
     });
@@ -957,6 +961,17 @@ export async function startServer(
     res.json({ success: true });
   });
 
+  if (options.managed) {
+    registerManagedRoutes(app, {
+      repositoryId,
+      taskKey: options.taskKey,
+      startedBy: 'wrapper',
+      getInitialSelection: () => initialSelection,
+      resolveSelection: (query) => getCommentSelectionFromQuery(query),
+      broadcast: (event) => fileWatcher.broadcast(event),
+    });
+  }
+
   // Function to output comments when server shuts down
   function outputFinalComments() {
     const session = getOrCreateCommentSession(currentCommentSelection);
@@ -1051,6 +1066,9 @@ export async function startServer(
     app,
     options.preferredPort || 4966,
     options.host || 'localhost',
+    // Managed instances get their port assigned by the wrapper daemon; a busy
+    // port must fail loudly instead of silently shifting the browser origin.
+    !options.managed,
   );
 
   // Security warning for non-localhost binding
@@ -1088,6 +1106,7 @@ async function startServerWithFallback(
   app: Express,
   preferredPort: number,
   host: string,
+  allowPortFallback = true,
 ): Promise<{ port: number; url: string; server: Server }> {
   return new Promise((resolve, reject) => {
     // express's listen() method uses listen() method in node:net Server instance internally
@@ -1105,6 +1124,10 @@ async function startServerWithFallback(
       switch (err.code) {
         // Try another port until it succeeds
         case 'EADDRINUSE': {
+          if (!allowPortFallback) {
+            reject(new Error(`Port ${preferredPort} is already in use`));
+            return;
+          }
           console.log(`Port ${preferredPort} is busy, trying ${preferredPort + 1}...`);
           return startServerWithFallback(app, preferredPort + 1, host)
             .then(({ port, url, server }) => {

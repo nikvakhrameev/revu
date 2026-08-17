@@ -30,7 +30,7 @@ function sendError(res: Response, e: unknown): void {
         ? 404
         : e.code === 'INVALID_ARGS'
           ? 400
-          : e.code === 'PLAN_VALIDATION_FAILED'
+          : e.code === 'PLAN_VALIDATION_FAILED' || e.code === 'COMMENT_VALIDATION_FAILED'
             ? 422
             : 409;
     res.status(status).json(revuError(e.code, e.message, e.details));
@@ -128,6 +128,17 @@ export function createDaemonApp(registry: Registry, onShutdown: () => void): Exp
       const body = req.body as Record<string, unknown>;
       const imports = Array.isArray(body.imports) ? body.imports : [body.imports];
       res.json(await registry.commentAdd(taskRefFromBody(body), imports));
+    }),
+  );
+
+  app.post(
+    '/api/comment/remove',
+    handler(async (req, res) => {
+      const body = req.body as Record<string, unknown>;
+      const ids = Array.isArray(body.ids)
+        ? body.ids.filter((id): id is string => typeof id === 'string')
+        : [];
+      res.json(await registry.commentRemove(taskRefFromBody(body), ids));
     }),
   );
 

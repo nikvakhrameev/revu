@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'child_process';
 import { mkdirSync, openSync, readFileSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
 import { Command } from 'commander';
@@ -20,7 +20,7 @@ interface TaskFlags {
 
 function taskParams(flags: TaskFlags): { repoPath: string; source?: string; base?: string } {
   return {
-    repoPath: flags.repo ?? process.cwd(),
+    repoPath: flags.repo ? resolve(flags.repo) : process.cwd(),
     source: flags.source,
     base: flags.base,
   };
@@ -213,7 +213,7 @@ review
   .action(async (opts: { repo?: string }) => {
     printResult(
       await daemonRequest<{ tasks: TaskSummary[] }>('GET', '/api/review/list', {
-        query: { repoPath: opts.repo },
+        query: { repoPath: opts.repo ? resolve(opts.repo) : undefined },
       }),
     );
   });
@@ -236,6 +236,16 @@ withTaskOptions(
   );
 });
 withTaskOptions(
+  comment
+    .command('remove')
+    .description('remove comments by id (thread, message, staged import or resolved thread)')
+    .argument('<ids...>', 'one or more comment ids'),
+).action(async (ids: string[], opts: TaskFlags) => {
+  printResult(
+    await daemonRequest('POST', '/api/comment/remove', { body: { ...taskParams(opts), ids } }),
+  );
+});
+withTaskOptions(
   comment.command('get').description('current + resolved threads from the daemon store'),
 ).action(async (opts: TaskFlags) => {
   printResult(await daemonRequest('GET', '/api/comment/get', { query: taskParams(opts) }));
@@ -243,10 +253,24 @@ withTaskOptions(
 
 // plan
 const plan = program.command('plan').description('walkthrough plan');
+
+/** Plan JSON from a file, or from stdin when the argument is "-". */
+async function readPlanArg(file: string): Promise<unknown> {
+  if (file === '-') {
+    const raw = await readStdinText();
+    if (!raw.trim()) throw makeCliError('INVALID_ARGS', 'No plan JSON on stdin');
+    return parseJsonArg(raw, 'plan from stdin');
+  }
+  return parseJsonArg(readFileSync(file, 'utf8'), `plan file ${file}`);
+}
+
 withTaskOptions(
-  plan.command('validate').description('dry-run plan validation').argument('<file>', 'plan JSON file'),
+  plan
+    .command('validate')
+    .description('dry-run plan validation')
+    .argument('<file | ->', 'plan JSON file, or - to read the plan from stdin'),
 ).action(async (file: string, opts: TaskFlags) => {
-  const planJson = parseJsonArg(readFileSync(file, 'utf8'), `plan file ${file}`);
+  const planJson = await readPlanArg(file);
   printResult(
     await daemonRequest('POST', '/api/plan/validate', {
       body: { ...taskParams(opts), plan: planJson },
@@ -257,9 +281,9 @@ withTaskOptions(
   plan
     .command('set')
     .description('validate, persist, hash and push the plan to the live instance')
-    .argument('<file>', 'plan JSON file'),
+    .argument('<file | ->', 'plan JSON file, or - to read the plan from stdin'),
 ).action(async (file: string, opts: TaskFlags) => {
-  const planJson = parseJsonArg(readFileSync(file, 'utf8'), `plan file ${file}`);
+  const planJson = await readPlanArg(file);
   printResult(
     await daemonRequest('PUT', '/api/plan', { body: { ...taskParams(opts), plan: planJson } }),
   );

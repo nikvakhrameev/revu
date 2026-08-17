@@ -1,7 +1,17 @@
 import { validatePlanStructure, type WalkthroughPlan } from '@revu/plan-schema';
 
 import {
+  applyStoreRemovals,
+  collectThreadAnchors,
+  enrichCommentImports,
+  validateCommentImports,
+  type CommentResolverContext,
+  type Side,
+} from './comments.js';
+import {
   computeRepositoryId,
+  getBlobLineCount,
+  getBlobLines,
   getCurrentBranch,
   getRepoRoot,
   isBranch,
@@ -29,6 +39,7 @@ import {
 import { InstanceWatcher } from './watcher.js';
 import {
   DEFAULT_INSTANCE_PORTS,
+  type CommentRemoveResponse,
   type ReviewStartResponse,
   type StaleReportEntry,
   type TaskRef,
@@ -43,6 +54,7 @@ export class TaskError extends Error {
       | 'TASK_NOT_FOUND'
       | 'INSTANCE_NOT_RUNNING'
       | 'PLAN_VALIDATION_FAILED'
+      | 'COMMENT_VALIDATION_FAILED'
       | 'PLAN_NOT_FOUND'
       | 'GIT_ERROR'
       | 'INVALID_ARGS',
@@ -128,6 +140,15 @@ export class Registry {
     const targetSha = await revParse(t.repoRoot, t.source);
     const baseSha = await mergeBase(t.repoRoot, t.base, t.source);
     return { baseSha, targetSha };
+  }
+
+  /** Pinned revisions of the live instance when one runs; otherwise current git.
+   *  Everything anchored to the reviewed diff (plans, comments) resolves here. */
+  private async pinnedRevisions(t: ResolvedTask): Promise<{ baseSha: string; targetSha: string }> {
+    const live = this.live.get(t.taskKeyHash);
+    const meta = t.store.getMeta();
+    if (live && meta) return { baseSha: meta.baseSha, targetSha: meta.targetSha };
+    return this.resolveRevisions(t);
   }
 
   /** Only committed code is reviewed: block when the task's source branch is
@@ -595,19 +616,156 @@ export class Registry {
 
   // ---------- Comments ----------
 
+  /** Blob access for comment anchors on the task's pinned revisions. */
+  private commentContext(
+    t: ResolvedTask,
+    revisions: { baseSha: string; targetSha: string },
+  ): CommentResolverContext {
+    const sha = (side: Side): string => (side === 'old' ? revisions.baseSha : revisions.targetSha);
+    return {
+      getLineCount: (filePath, side) => getBlobLineCount(t.repoRoot, sha(side), filePath),
+      getLines: (filePath, side) => getBlobLines(t.repoRoot, sha(side), filePath),
+    };
+  }
+
   async commentAdd(ref: TaskRef, imports: unknown[]): Promise<unknown> {
     const t = await this.resolveTask(ref);
+    const revisions = await this.pinnedRevisions(t);
+    const ctx = this.commentContext(t, revisions);
+    const existingThreads = collectThreadAnchors([
+      ...(t.store.getThreads()?.threads ?? []),
+      ...t.store.getStaging().imports,
+    ]);
+    const result = await validateCommentImports(imports, ctx, existingThreads);
+    if (!result.ok) {
+      throw new TaskError('COMMENT_VALIDATION_FAILED', 'Comment validation failed', result.errors);
+    }
+    const enriched = await enrichCommentImports(imports, ctx);
+
     const live = this.live.get(t.taskKeyHash);
     if (live && isPidAlive(live.pid)) {
-      const result = await this.postImports(live, imports);
+      const posted = await this.postImports(live, enriched);
       this.queueSnapshot(live);
-      return result;
+      return posted;
     }
     // Dead instance: stage for the next review start.
     const staging = t.store.getStaging();
-    staging.imports.push(...imports);
+    staging.imports.push(...enriched);
     t.store.setStaging(staging);
-    return { staged: true, count: imports.length };
+    return { staged: true, count: enriched.length };
+  }
+
+  /** Removal inside the live instance; the UI drops the comments immediately. */
+  private async postRemovals(
+    live: LiveTask,
+    ids: string[],
+  ): Promise<{ removedThreads: string[]; removedMessages: string[] }> {
+    const res = await fetch(
+      `http://localhost:${live.port}/api/comment-removals?${this.sessionQuery(live)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    const body: unknown = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(`comment-removals failed: ${res.status} ${JSON.stringify(body)}`);
+    }
+    const data = body as { removedThreads?: unknown; removedMessages?: unknown };
+    const strings = (value: unknown): string[] =>
+      Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+    return {
+      removedThreads: strings(data.removedThreads),
+      removedMessages: strings(data.removedMessages),
+    };
+  }
+
+  /** Applies the removal to threads.json / staging.json / resolved.json and
+   *  reports it together with whatever the live instance removed. */
+  private removeFromStore(
+    store: TaskStore,
+    ids: string[],
+    inInstance?: { removedThreads: string[]; removedMessages: string[] },
+  ): CommentRemoveResponse {
+    const threadsFile = store.getThreads();
+    const staging = store.getStaging();
+    const resolvedFile = store.getResolved();
+    const result = applyStoreRemovals<StoredThread>(
+      {
+        threads: threadsFile?.threads ?? [],
+        staging: staging.imports,
+        resolved: resolvedFile.threads,
+      },
+      ids,
+    );
+    if (threadsFile && result.threadsChanged) {
+      store.setThreads({ ...threadsFile, threads: result.threads });
+    }
+    if (result.stagingChanged) {
+      store.setStaging({ schemaVersion: 1, imports: result.staging });
+    }
+    if (result.resolvedChanged) {
+      store.setResolved({ schemaVersion: 1, threads: result.resolved });
+    }
+
+    const removedThreads = [
+      ...new Set([...result.removedThreads, ...(inInstance?.removedThreads ?? [])]),
+    ];
+    const removedMessages = [
+      ...new Set([...result.removedMessages, ...(inInstance?.removedMessages ?? [])]),
+    ];
+    const removed = new Set([
+      ...removedThreads,
+      ...removedMessages,
+      ...result.removedStaged,
+      ...result.removedResolved,
+    ]);
+    return {
+      removedThreads,
+      removedMessages,
+      removedStaged: result.removedStaged,
+      removedResolved: result.removedResolved,
+      notFound: [...new Set(ids)].filter((id) => !removed.has(id)),
+    };
+  }
+
+  async commentRemove(ref: TaskRef, ids: string[]): Promise<CommentRemoveResponse> {
+    if (ids.length === 0) {
+      throw new TaskError('INVALID_ARGS', 'ids must be a non-empty array of comment ids');
+    }
+    const t = await this.resolveTask(ref);
+    const store = t.store;
+    if (
+      !store.getMeta() &&
+      !store.getThreads() &&
+      store.getStaging().imports.length === 0 &&
+      store.getResolved().threads.length === 0
+    ) {
+      throw new TaskError('TASK_NOT_FOUND', 'No such task');
+    }
+
+    const live = this.live.get(t.taskKeyHash);
+    if (!live || !isPidAlive(live.pid)) {
+      return this.removeFromStore(store, ids);
+    }
+
+    // Instance and store must be updated as one link in the snapshot chain:
+    // a snapshot observing "gone from difit but still in threads.json" would
+    // archive the removed threads into resolved.json as if the user had
+    // resolved them in the UI.
+    const removal = live.snapshotChain.then(async () => {
+      const inInstance = await this.postRemovals(live, ids);
+      return this.removeFromStore(store, ids, inInstance);
+    });
+    live.snapshotChain = removal.then(
+      () => undefined,
+      () => undefined,
+    );
+    const result = await removal;
+    this.queueSnapshot(live);
+    return result;
   }
 
   async commentGet(ref: TaskRef): Promise<unknown> {
@@ -627,17 +785,9 @@ export class Registry {
 
   // ---------- Plan ----------
 
-  /** Pinned revisions of the live instance when one runs; otherwise current git. */
-  private async planRevisions(t: ResolvedTask): Promise<{ baseSha: string; targetSha: string }> {
-    const live = this.live.get(t.taskKeyHash);
-    const meta = t.store.getMeta();
-    if (live && meta) return { baseSha: meta.baseSha, targetSha: meta.targetSha };
-    return this.resolveRevisions(t);
-  }
-
   async planValidate(ref: TaskRef, plan: unknown): Promise<{ ok: true }> {
     const t = await this.resolveTask(ref);
-    const revisions = await this.planRevisions(t);
+    const revisions = await this.pinnedRevisions(t);
     const result = await validatePlanFull(plan, t.repoRoot, revisions.baseSha, revisions.targetSha);
     if (!result.ok) {
       throw new TaskError('PLAN_VALIDATION_FAILED', 'Plan validation failed', result.errors);
@@ -647,7 +797,7 @@ export class Registry {
 
   async planSet(ref: TaskRef, plan: unknown): Promise<{ ok: true; stale: StaleReportEntry[] }> {
     const t = await this.resolveTask(ref);
-    const revisions = await this.planRevisions(t);
+    const revisions = await this.pinnedRevisions(t);
     const result = await validatePlanFull(plan, t.repoRoot, revisions.baseSha, revisions.targetSha);
     if (!result.ok) {
       throw new TaskError('PLAN_VALIDATION_FAILED', 'Plan validation failed', result.errors);
@@ -678,7 +828,7 @@ export class Registry {
     const t = await this.resolveTask(ref);
     const planFile = t.store.getPlan();
     if (!planFile) throw new TaskError('PLAN_NOT_FOUND', 'No plan stored for this task');
-    const revisions = await this.planRevisions(t);
+    const revisions = await this.pinnedRevisions(t);
     const stale = await computeStaleReport(planFile, t.repoRoot, revisions.baseSha, revisions.targetSha);
     return { plan: planFile.plan, stale, setAt: planFile.setAt };
   }
@@ -687,7 +837,7 @@ export class Registry {
     const t = await this.resolveTask(ref);
     const planFile = t.store.getPlan();
     if (!planFile) throw new TaskError('PLAN_NOT_FOUND', 'No plan stored for this task');
-    const revisions = await this.planRevisions(t);
+    const revisions = await this.pinnedRevisions(t);
     const stale = await computeStaleReport(planFile, t.repoRoot, revisions.baseSha, revisions.targetSha);
     return { stale, fresh: stale.length === 0 };
   }

@@ -1272,6 +1272,206 @@ describe('Server Integration Tests', () => {
     });
   });
 
+  describe('Managed comment removals API', () => {
+    let port: number;
+    const isoNow = '2024-01-01T00:00:00Z';
+
+    beforeEach(async () => {
+      const result = await startServer({
+        selection: { targetCommitish: 'HEAD', baseCommitish: 'HEAD^' },
+        preferredPort: 9041,
+        managed: true,
+        taskKey: 'task-key',
+      });
+      servers.push(result.server);
+      port = result.port;
+    });
+
+    const importComments = (imports: unknown[]) =>
+      fetch(`http://localhost:${port}/api/comment-imports`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(imports),
+      });
+
+    const removeComments = (ids: unknown, query = '') =>
+      fetch(`http://localhost:${port}/api/comment-removals${query}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+
+    const getSession = async () => {
+      const res = await fetch(`http://localhost:${port}/api/comments-json`);
+      return (await res.json()) as {
+        version: number;
+        threads: Array<{ id: string; messages: Array<{ id: string; body: string }> }>;
+      };
+    };
+
+    it('removes a whole thread by thread id and bumps the version', async () => {
+      await importComments([
+        {
+          type: 'thread',
+          id: 'thread-a',
+          filePath: 'src/a.ts',
+          position: { side: 'new', line: 10 },
+          body: 'first finding',
+          author: 'Agent',
+        },
+        {
+          type: 'thread',
+          id: 'thread-b',
+          filePath: 'src/b.ts',
+          position: { side: 'new', line: 20 },
+          body: 'second finding',
+          author: 'Agent',
+        },
+      ]);
+      const before = await getSession();
+      expect(before.threads).toHaveLength(2);
+
+      const response = await removeComments(['thread-a']);
+      const data = (await response.json()) as any;
+
+      expect(response.ok).toBe(true);
+      expect(data).toEqual({
+        removedThreads: ['thread-a'],
+        removedMessages: [],
+        notFound: [],
+      });
+
+      // A version bump is what triggers the commentsChanged broadcast.
+      const after = await getSession();
+      expect(after.version).toBeGreaterThan(before.version);
+      expect(after.threads.map((thread) => thread.id)).toEqual(['thread-b']);
+    });
+
+    it('removes a single message and keeps the surviving thread', async () => {
+      await importComments([
+        {
+          type: 'thread',
+          id: 'thread-c',
+          filePath: 'src/c.ts',
+          position: { side: 'new', line: 5 },
+          body: 'root message',
+          author: 'Agent',
+        },
+        {
+          type: 'reply',
+          id: 'reply-c',
+          filePath: 'src/c.ts',
+          position: { side: 'new', line: 5 },
+          body: 'reply message',
+          author: 'Agent',
+        },
+      ]);
+
+      const response = await removeComments(['reply-c']);
+      const data = (await response.json()) as any;
+
+      expect(data).toEqual({
+        removedThreads: [],
+        removedMessages: ['reply-c'],
+        notFound: [],
+      });
+
+      const after = await getSession();
+      const thread = after.threads.find((t) => t.id === 'thread-c');
+      expect(thread?.messages).toHaveLength(1);
+      expect(thread?.messages[0]?.body).toBe('root message');
+    });
+
+    it('drops a thread whose last message is removed', async () => {
+      await fetch(`http://localhost:${port}/api/comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          threads: [
+            {
+              id: 'thread-d',
+              filePath: 'src/d.ts',
+              createdAt: isoNow,
+              updatedAt: isoNow,
+              position: { side: 'new', line: 7 },
+              messages: [{ id: 'message-d', body: 'only message', createdAt: isoNow }],
+            },
+          ],
+        }),
+      });
+
+      const response = await removeComments(['message-d']);
+      const data = (await response.json()) as any;
+
+      expect(data).toEqual({
+        removedThreads: ['thread-d'],
+        removedMessages: ['message-d'],
+        notFound: [],
+      });
+
+      const after = await getSession();
+      expect(after.threads).toHaveLength(0);
+    });
+
+    it('reports unknown ids as notFound without failing', async () => {
+      await importComments([
+        {
+          type: 'thread',
+          id: 'thread-e',
+          filePath: 'src/e.ts',
+          position: { side: 'new', line: 1 },
+          body: 'kept finding',
+          author: 'Agent',
+        },
+      ]);
+      const before = await getSession();
+
+      const response = await removeComments(['ghost-1', 'ghost-2']);
+      const data = (await response.json()) as any;
+
+      expect(response.status).toBe(200);
+      expect(data).toEqual({
+        removedThreads: [],
+        removedMessages: [],
+        notFound: ['ghost-1', 'ghost-2'],
+      });
+
+      // Nothing changed, so no version bump and no broadcast.
+      const after = await getSession();
+      expect(after.version).toBe(before.version);
+      expect(after.threads).toHaveLength(1);
+    });
+
+    it('honors the base/target session query the wrapper sends', async () => {
+      await importComments([
+        {
+          type: 'thread',
+          id: 'thread-f',
+          filePath: 'src/f.ts',
+          position: { side: 'new', line: 3 },
+          body: 'session-keyed finding',
+          author: 'Agent',
+        },
+      ]);
+
+      // Same revisions the wrapper reads back from /api/diff.
+      const response = await removeComments(['thread-f'], '?base=def4567&target=abc1234');
+      const data = (await response.json()) as any;
+
+      expect(data.removedThreads).toEqual(['thread-f']);
+      const after = await getSession();
+      expect(after.threads).toHaveLength(0);
+    });
+
+    it('rejects a payload without a string id array', async () => {
+      const response = await removeComments('thread-a');
+
+      expect(response.status).toBe(400);
+      const data = (await response.json()) as any;
+      expect(data).toHaveProperty('error');
+    });
+  });
+
   describe('Static file serving', () => {
     let originalNodeEnv: string | undefined;
 

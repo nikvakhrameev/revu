@@ -49,6 +49,20 @@ export interface CommentAddRequest extends TaskRef {
   imports: unknown[];
 }
 
+export interface CommentRemoveRequest extends TaskRef {
+  /** Thread, message, staged import or resolved thread ids. */
+  ids: string[];
+}
+
+/** Removal is idempotent: unknown ids are reported, not an error. */
+export interface CommentRemoveResponse {
+  removedThreads: string[];
+  removedMessages: string[];
+  removedStaged: string[];
+  removedResolved: string[];
+  notFound: string[];
+}
+
 export interface PlanSetRequest extends TaskRef {
   plan: unknown;
 }
@@ -78,5 +92,6 @@ export const ERROR_EXIT_CODES: Record<RevuErrorCode, number> = {
   PLAN_NOT_FOUND: 9,
   GIT_ERROR: 10,
   GLAB_ERROR: 11,
+  COMMENT_VALIDATION_FAILED: 12,
   INTERNAL: 1,
 };

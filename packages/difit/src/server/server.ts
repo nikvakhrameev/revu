@@ -969,6 +969,10 @@ export async function startServer(
       getInitialSelection: () => initialSelection,
       resolveSelection: (query) => getCommentSelectionFromQuery(query),
       broadcast: (event) => fileWatcher.broadcast(event),
+      getCommentThreads: (selection) => getOrCreateCommentSession(selection).threads,
+      setCommentThreads: (selection, threads) => {
+        updateCommentSession(selection, threads);
+      },
     });
   }
 

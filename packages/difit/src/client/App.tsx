@@ -1,4 +1,14 @@
-import { Columns, AlignLeft, Settings, PanelLeftClose, PanelLeft, Keyboard } from 'lucide-react';
+import {
+  Columns,
+  AlignLeft,
+  Settings,
+  PanelLeftClose,
+  PanelLeft,
+  Keyboard,
+  BookOpen,
+  FileDiff,
+  Check,
+} from 'lucide-react';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 
 import {
@@ -33,6 +43,7 @@ import { ReloadButton } from './components/ReloadButton';
 import { RevisionDetailModal } from './components/RevisionDetailModal';
 import { SettingsModal } from './components/SettingsModal';
 import { SparkleAnimation } from './components/SparkleAnimation';
+import { PlanView } from './components/walkthrough/PlanView';
 import { WordHighlightProvider } from './contexts/WordHighlightContext';
 import { useAppearanceSettings } from './hooks/useAppearanceSettings';
 import { useDiffComments } from './hooks/useDiffComments';
@@ -41,6 +52,7 @@ import { useFileWatch } from './hooks/useFileWatch';
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
 import { useLazyDiffRendering } from './hooks/useLazyDiffRendering';
 import { useViewedFiles } from './hooks/useViewedFiles';
+import { useWalkthrough } from './hooks/useWalkthrough';
 import { useViewport } from './hooks/useViewport';
 import { fetchClientSettings, saveClientSettings } from './services/userSettings';
 import { hasMultipleCommentAuthors } from './utils/commentAuthors';
@@ -182,6 +194,10 @@ function App() {
   const { settings, updateSettings } = useAppearanceSettings();
   const { isMobile, isDesktop } = useViewport();
 
+  // Managed mode (wrapper-controlled instance): the server is the comment
+  // authority, revisions are fixed and the walkthrough/finish-review UI is on.
+  const isManaged = diffData?.managed === true;
+
   // New diff-aware comment system
   const {
     hasLoadedComments,
@@ -202,6 +218,7 @@ function App() {
     undefined, // branchToHash map - could be populated from server data
     diffData?.repositoryId, // Repository identifier for storage isolation
     resolvedSelection?.baseMode,
+    isManaged, // externalCommentAuthority: no localStorage for threads
   );
 
   const showMobileCommentsBar = isMobile && threads.length > 0;

@@ -453,9 +453,11 @@ export function useDiffComments(
       branchToHash,
       createEmptyDiffContext,
       currentCommitHash,
+      externalAuthority,
       loadDiffContextData,
       repositoryId,
       baseMode,
+      threads,
     ],
   );
 

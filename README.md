@@ -17,7 +17,9 @@ docs/                 design documents
 ```bash
 pnpm install
 pnpm build
-cd packages/revu && pnpm link --global   # puts `revu` on PATH
+# put `revu` on PATH (pnpm 11 removed `pnpm link --global`; a wrapper script is simplest):
+printf '#!/bin/sh\nexec node "%s/packages/revu/dist/cli/index.js" "$@"\n' "$PWD" > /opt/homebrew/bin/revu
+chmod +x /opt/homebrew/bin/revu
 ```
 
 Requires Node >= 21, pnpm 11, git. GitLab sync additionally requires `glab` (`glab auth login`).

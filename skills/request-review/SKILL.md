@@ -52,6 +52,8 @@ This starts (or reuses) a difit instance for the current branch, opens the brows
 
 Non-blocking primitives exist too: `revu review start`, `revu review wait`, `revu review stop`, `revu review refresh`, `revu review list` — same cycle, split into steps.
 
+**Live-dialog pattern.** While `review run` blocks, you cannot react to the user's in-thread questions until Finish (the daemon still captures every comment, so nothing is lost — you get them all at Finish). If the user is expected to ask questions in threads and wants answers *before* finishing, use the non-blocking loop instead: `revu review start --open`, then periodically `revu comment get` (new messages without `author` are the user's), answer with `revu comment add` (`type: "reply"`, same position — it appears in their browser instantly), and call `revu review wait` once the conversation settles.
+
 ## Adding comments
 
 Attach explanations or notes to specific lines so the user sees them right on the diff:

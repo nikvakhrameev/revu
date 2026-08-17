@@ -8,7 +8,7 @@ Task-oriented code review wrapper around a managed [difit](https://github.com/yo
 packages/difit        difit fork (git subtree); all changes gated behind --managed
 packages/revu         the revu daemon + CLI (the only binary installed outside)
 packages/plan-schema  walkthrough plan validation + shared types
-skills/               Claude Code skills: request-review, review-code
+skills/               Claude Code skills: request-review, request-plan-review, review-code
 docs/                 design documents
 ```
 
@@ -44,4 +44,5 @@ Config (optional): `~/.revu/config.json` — `{"daemonPort": ..., "instancePorts
 ## Agent skills
 
 `skills/request-review` — ask the user for a review (commit → plan → `revu review run` → address feedback).
+`skills/request-plan-review` — discuss a feature plan on a real diff before implementing: commit a compilable design sketch (signatures + doc comments + wiring, stub bodies) and run the review cycle on it.
 `skills/review-code` — review a diff yourself and present findings as anchored threads + a walkthrough plan.

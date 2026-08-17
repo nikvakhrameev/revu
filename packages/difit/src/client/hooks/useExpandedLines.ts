@@ -44,7 +44,8 @@ interface UseExpandedLinesResult {
   getHiddenLinesAfter: (file: DiffFile, chunk: DiffChunk, chunkIndex: number) => number;
 }
 
-async function fetchFileContent(
+// Exported so the walkthrough snippet machinery can reuse the same blob fetch.
+export async function fetchFileContent(
   filePath: string,
   commitish: string,
 ): Promise<{ lines: string[]; totalLines: number }> {

@@ -91,12 +91,15 @@ export function useDiffComments(
   branchToHash?: Map<string, string>,
   repositoryId?: string,
   baseMode?: BaseMode,
+  // Managed instances: the server is the only comment authority — never read
+  // or write threads from/to localStorage (viewed files are unaffected).
+  externalAuthority?: boolean,
 ): UseDiffCommentsReturn {
   const [threads, setThreads] = useState<DiffCommentThread[]>([]);
   const [hasLoadedComments, setHasLoadedComments] = useState(false);
 
   const loadDiffContextData = useCallback(() => {
-    if (!baseCommitish || !targetCommitish) {
+    if (!baseCommitish || !targetCommitish || externalAuthority) {
       return null;
     }
 
@@ -108,7 +111,15 @@ export function useDiffComments(
       repositoryId,
       baseMode,
     );
-  }, [baseCommitish, targetCommitish, currentCommitHash, branchToHash, repositoryId, baseMode]);
+  }, [
+    baseCommitish,
+    targetCommitish,
+    currentCommitHash,
+    branchToHash,
+    repositoryId,
+    baseMode,
+    externalAuthority,
+  ]);
 
   const createEmptyDiffContext = useCallback((): DiffContextStorage | null => {
     if (!baseCommitish || !targetCommitish) {
@@ -136,6 +147,14 @@ export function useDiffComments(
       return;
     }
 
+    if (externalAuthority) {
+      // Server-authoritative mode: start empty; the app bootstraps threads
+      // from the server instead of localStorage.
+      setThreads([]);
+      setHasLoadedComments(true);
+      return;
+    }
+
     const loadedThreads =
       loadDiffContextData()?.threads ||
       storageService.getCommentThreads(
@@ -155,6 +174,7 @@ export function useDiffComments(
     branchToHash,
     repositoryId,
     baseMode,
+    externalAuthority,
     loadDiffContextData,
   ]);
 
@@ -162,19 +182,29 @@ export function useDiffComments(
     (newThreads: DiffCommentThread[]) => {
       if (!baseCommitish || !targetCommitish) return;
 
-      storageService.saveCommentThreads(
-        baseCommitish,
-        targetCommitish,
-        newThreads,
-        currentCommitHash,
-        branchToHash,
-        repositoryId,
-        baseMode,
-      );
+      if (!externalAuthority) {
+        storageService.saveCommentThreads(
+          baseCommitish,
+          targetCommitish,
+          newThreads,
+          currentCommitHash,
+          branchToHash,
+          repositoryId,
+          baseMode,
+        );
+      }
       setThreads(newThreads);
       setHasLoadedComments(true);
     },
-    [baseCommitish, targetCommitish, currentCommitHash, branchToHash, repositoryId, baseMode],
+    [
+      baseCommitish,
+      targetCommitish,
+      currentCommitHash,
+      branchToHash,
+      repositoryId,
+      baseMode,
+      externalAuthority,
+    ],
   );
 
   const replaceThreads = useCallback(
@@ -334,7 +364,7 @@ export function useDiffComments(
 
   const clearAllCommentsWithOptions = useCallback(
     (options?: { resetAppliedCommentImportIds?: boolean }) => {
-      if (!options?.resetAppliedCommentImportIds) {
+      if (!options?.resetAppliedCommentImportIds || externalAuthority) {
         clearAllComments();
         return;
       }
@@ -368,6 +398,7 @@ export function useDiffComments(
       clearAllComments,
       createEmptyDiffContext,
       currentCommitHash,
+      externalAuthority,
       loadDiffContextData,
       repositoryId,
       baseMode,
@@ -378,6 +409,13 @@ export function useDiffComments(
     (imports: CommentImport[], importId: string): string[] => {
       if (!baseCommitish || !targetCommitish || imports.length === 0 || importId.length === 0) {
         return [];
+      }
+
+      if (externalAuthority) {
+        // Server-authoritative mode: merge in memory only, never touch storage.
+        const merged = mergeCommentImports(threads, imports);
+        setThreads(merged.threads);
+        return merged.warnings;
       }
 
       const existingData = loadDiffContextData() || createEmptyDiffContext();

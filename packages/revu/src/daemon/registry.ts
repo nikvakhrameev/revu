@@ -563,12 +563,24 @@ export class Registry {
     });
   }
 
-  async reviewList(): Promise<TaskSummary[]> {
-    return listAllTaskMetas().map((meta) => {
+  async reviewList(repoPath?: string): Promise<TaskSummary[]> {
+    let repoRootFilter: string | null = null;
+    if (repoPath) {
+      try {
+        repoRootFilter = await getRepoRoot(repoPath);
+      } catch {
+        repoRootFilter = repoPath;
+      }
+    }
+    const metas = listAllTaskMetas().filter(
+      (m) => !repoRootFilter || m.repoRoot === repoRootFilter,
+    );
+    return metas.map((meta) => {
       const live = this.live.get(meta.taskKeyHash);
       return {
         taskKey: meta.taskKeyHash,
         repositoryId: meta.repositoryId,
+        repoRoot: meta.repoRoot,
         source: meta.source,
         base: meta.base,
         port: meta.port,

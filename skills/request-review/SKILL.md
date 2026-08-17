@@ -32,10 +32,22 @@ This starts (or reuses) a difit instance for the current branch, opens the brows
 {"status": "finished", "threads": [...], "resolved": [...], "capturedAt": "...", "headSha": "..."}
 ```
 
-5. Interpret the result:
-   - `threads` are the live comment threads at Finish time. Threads you did not author (no `author` field set by you, or reply messages appended to your threads) are the user's feedback — address each one.
-   - **Finish with no new comments means "no review findings". Do not restart the review.**
+5. Interpret the result. Comments created in the difit UI carry **no `author` field**, while you must set `"author"` on everything you add (see below) — that is the classification rule:
+   - Any thread or reply message **without an `author`** is the user's feedback — address each one.
+   - **Finish with no new user comments means "no review findings". Do not restart the review.**
    - `resolved` lists threads the user closed — treat them as accepted/done.
+
+   Example of a Finish with feedback — the user replied to your thread (second message, no `author`) :
+
+```json
+{"status":"finished","threads":[{"id":"agent-note-1","filePath":"src/api/limiter.ts",
+  "position":{"side":"new","line":42},
+  "messages":[
+    {"id":"agent-note-1","body":"This implements the retry logic.","author":"agent", "createdAt":"..."},
+    {"id":"x8k2...","body":"Please also handle negative values here.","createdAt":"..."}]}],
+ "resolved":[]}
+```
+
 6. After addressing feedback: commit the fixes and run `revu review run --open` again. The instance restarts on the new head; previous threads are re-injected automatically (outdated ones get an "outdated" badge), nothing is lost.
 
 Non-blocking primitives exist too: `revu review start`, `revu review wait`, `revu review stop`, `revu review refresh`, `revu review list` — same cycle, split into steps.
@@ -45,10 +57,11 @@ Non-blocking primitives exist too: `revu review start`, `revu review wait`, `rev
 Attach explanations or notes to specific lines so the user sees them right on the diff:
 
 ```bash
-revu comment add '{"type":"thread","filePath":"src/example.ts","position":{"side":"new","line":{"start":36,"end":39}},"body":"This block implements the retry logic requested in the ticket."}'
+revu comment add '{"type":"thread","id":"agent-retry-note","author":"agent","filePath":"src/example.ts","position":{"side":"new","line":{"start":36,"end":39}},"body":"This block implements the retry logic requested in the ticket."}'
 ```
 
-- Format is a JSON object or array of `{type, filePath, position, body}`.
+- Format is a JSON object or array of `{type, id, author, filePath, position, body}`.
+- **Always set `id` (your own stable slug) and `author` (e.g. `"agent"`)** on everything you add: `id` makes re-imports idempotent and lets you recognize your own threads later; `author` is how your comments are told apart from the user's (UI comments have none).
 - `type`: `"thread"` for a new comment, `"reply"` to answer an existing thread at the same position.
 - `position.side`: `"new"` for lines on the target side of the diff, `"old"` for deleted lines.
 - `position.line`: a number or `{"start": N, "end": M}` for ranges.
@@ -94,10 +107,11 @@ Iterate on `plan validate` until it returns `{"ok": true}` — error entries nam
 
 ## Error handling
 
-Errors are JSON on stderr: `{"error": {"code", "message", "details?"}}`. Common codes: `DIRTY_WORKTREE` (commit first or pass `--allow-dirty` if the user explicitly asks), `DAEMON_UNREACHABLE` (ask the user to run `revu daemon up`), `PLAN_VALIDATION_FAILED` (fix the plan from `details`), `TASK_NOT_FOUND` (run `revu review start` first).
+Errors are JSON on stderr: `{"error": {"code", "message", "details?"}}` with distinct exit codes. Common ones: `DIRTY_WORKTREE` (exit 6 — commit first, or pass `--allow-dirty` only if the user explicitly asks), `DAEMON_UNREACHABLE` (exit 3 — ask the user to run `revu daemon up`), `PLAN_VALIDATION_FAILED` (exit 8 — fix the plan from `details` and re-validate), `TASK_NOT_FOUND` (exit 4 — run `revu review start` first). Exit 0 = success.
 
 ## Constraints
 
-- Git-managed directories only.
+- Run commands from inside the repository (or pass `--repo <path>` explicitly — every command supports it).
+- `revu review list` shows tasks of **all** repositories the daemon knows; use `--repo .` or match the `repoRoot` field to find yours.
 - Do not run the difit binary directly; always go through `revu`.
 - Manual verification that the browser page opened is unnecessary.

@@ -253,6 +253,38 @@ function App() {
     },
     [commentSessionQueryString],
   );
+
+  // Walkthrough plan (managed instances only)
+  const { payload: walkthroughPayload, refetch: refetchWalkthrough } = useWalkthrough(
+    isManaged,
+    commentSessionQueryString,
+  );
+  const [viewMode, setViewMode] = useState<'plan' | 'diff'>('diff');
+  const hasAutoOpenedPlanRef = useRef(false);
+  useEffect(() => {
+    // Land in plan mode when a plan exists (once per tab; position is in-tab only).
+    if (walkthroughPayload && !hasAutoOpenedPlanRef.current) {
+      hasAutoOpenedPlanRef.current = true;
+      setViewMode('plan');
+    }
+  }, [walkthroughPayload]);
+  const isPlanMode = viewMode === 'plan' && walkthroughPayload !== null;
+
+  // Finish review (managed instances only)
+  const [reviewFinishState, setReviewFinishState] = useState<'idle' | 'pending' | 'done'>('idle');
+  const handleFinishReview = useCallback(async () => {
+    setReviewFinishState('pending');
+    try {
+      const response = await fetch('/api/review/finish', { method: 'POST' });
+      if (!response.ok) {
+        throw new Error(`${response.status} ${response.statusText}`);
+      }
+      setReviewFinishState('done');
+    } catch (finishError) {
+      console.error('Failed to finish review:', finishError);
+      setReviewFinishState('idle');
+    }
+  }, []);
   const [bootstrappedCommentsKey, setBootstrappedCommentsKey] = useState<string | null>(null);
   const hasBootstrappedComments =
     commentsContextKey !== null && commentsContextKey === bootstrappedCommentsKey;
@@ -586,10 +618,19 @@ function App() {
     }
   }, [commentsContextKey, fetchServerThreads, replaceThreads]);
 
+  const handleWalkthroughChanged = useCallback(async () => {
+    await refetchWalkthrough();
+  }, [refetchWalkthrough]);
+  const handleReviewFinished = useCallback(() => {
+    setReviewFinishState('done');
+  }, []);
+
   // File watch for reload functionality - initialize with callback
   const { shouldReload, reload, watchState } = useFileWatch(
     handleWatchReload,
     handleCommentsChanged,
+    handleWalkthroughChanged,
+    handleReviewFinished,
   );
 
   // Track which file the mouse is over so `v` works without a cursor
@@ -645,6 +686,32 @@ function App() {
       }
     },
     [toggleFileReviewed, diffData, rememberFilePosition],
+  );
+
+  // Drill-down from a walkthrough snippet: switch to the diff and scroll to
+  // the same file/lines (reuses the CommentsListModal scroll mechanics).
+  const handleOpenSnippetInDiff = useCallback(
+    (filePath: string, side: DiffSide, line: number) => {
+      setViewMode('diff');
+      const pseudoThread: CommentThread = {
+        id: 'walkthrough-drilldown',
+        file: filePath,
+        line,
+        side,
+        createdAt: '',
+        updatedAt: '',
+        messages: [],
+      };
+      const position = findCommentPosition(pseudoThread, navigableFiles);
+      requestAnimationFrame(() => {
+        if (position) {
+          setCursorPosition(position);
+        } else {
+          scrollFileIntoDiffContainer(filePath);
+        }
+      });
+    },
+    [navigableFiles, scrollFileIntoDiffContainer, setCursorPosition],
   );
 
   useEffect(() => {
@@ -931,7 +998,9 @@ function App() {
       return;
     }
 
-    const shouldReplaceFromServer = pendingBootstrapAfterLocalResetRef.current;
+    // Managed instances: the server is the only comment authority — bootstrap
+    // straight from it, never merge with (or push back) local state.
+    const shouldReplaceFromServer = isManaged || pendingBootstrapAfterLocalResetRef.current;
     pendingBootstrapAfterLocalResetRef.current = false;
 
     bootstrappingCommentsKeyRef.current = commentsContextKey;
@@ -983,6 +1052,7 @@ function App() {
     commentsContextKey,
     fetchServerThreads,
     hasLoadedComments,
+    isManaged,
     replaceThreads,
     syncThreadsToServer,
     threads,
@@ -1116,6 +1186,8 @@ function App() {
   const handleNavigateToComment = (thread: CommentThread) => {
     if (!diffData) return;
 
+    // Comment navigation always targets the full diff view.
+    setViewMode('diff');
     const position = findCommentPosition(thread, diffData.files);
     if (position) {
       setCursorPosition(position);
@@ -1303,6 +1375,34 @@ function App() {
                   </button>
                 </div>
               )}
+              {walkthroughPayload && (
+                <div className="flex bg-github-bg-tertiary border border-github-border rounded-md p-1">
+                  <button
+                    onClick={() => setViewMode('plan')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded transition-all duration-200 flex items-center gap-1.5 cursor-pointer ${
+                      isPlanMode
+                        ? 'bg-github-bg-primary text-github-text-primary shadow-sm'
+                        : 'text-github-text-secondary hover:text-github-text-primary'
+                    }`}
+                    title="Show the walkthrough plan"
+                  >
+                    <BookOpen size={14} />
+                    Plan
+                  </button>
+                  <button
+                    onClick={() => setViewMode('diff')}
+                    className={`px-3 py-1.5 text-xs font-medium rounded transition-all duration-200 flex items-center gap-1.5 cursor-pointer ${
+                      !isPlanMode
+                        ? 'bg-github-bg-primary text-github-text-primary shadow-sm'
+                        : 'text-github-text-secondary hover:text-github-text-primary'
+                    }`}
+                    title="Show the full diff"
+                  >
+                    <FileDiff size={14} />
+                    Diff
+                  </button>
+                </div>
+              )}
               <Checkbox
                 checked={ignoreWhitespace}
                 onChange={setIgnoreWhitespace}
@@ -1331,6 +1431,31 @@ function App() {
                   onDeleteAll={clearAllComments}
                   onViewAll={() => setIsCommentsListOpen(true)}
                 />
+              )}
+              {isManaged && (
+                <button
+                  onClick={() => void handleFinishReview()}
+                  disabled={reviewFinishState !== 'idle'}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 ${
+                    reviewFinishState === 'done'
+                      ? 'border border-github-border text-github-text-secondary cursor-default'
+                      : reviewFinishState === 'pending'
+                        ? 'bg-github-accent text-white opacity-60 cursor-wait'
+                        : 'bg-github-accent text-white hover:opacity-90 cursor-pointer'
+                  }`}
+                  title="Finish this review"
+                >
+                  {reviewFinishState === 'done' ? (
+                    <>
+                      <Check size={14} />
+                      Review finished
+                    </>
+                  ) : reviewFinishState === 'pending' ? (
+                    'Finishing...'
+                  ) : (
+                    'Finish review'
+                  )}
+                </button>
               )}
               <div className="flex flex-col gap-1 items-center">
                 <div className="text-xs relative">
@@ -1362,7 +1487,8 @@ function App() {
                   />
                 </div>
               </div>
-              {revisionOptions ? (
+              {/* Managed instances pin the revisions — hide the revision selector */}
+              {revisionOptions && !isManaged ? (
                 <DiffQuickMenu
                   options={revisionOptions}
                   selection={selectedRevision}
@@ -1392,7 +1518,7 @@ function App() {
             </div>
           </div>
         </header>
-        {revisionOptions && (
+        {revisionOptions && !isManaged && (
           <RevisionDetailModal
             key={isRevisionModalOpen ? getDiffSelectionKey(selectedRevision) : 'closed'}
             isOpen={isRevisionModalOpen}
@@ -1415,6 +1541,34 @@ function App() {
         )}
 
         <div className="flex flex-1 overflow-hidden relative">
+          {/* Walkthrough plan mode: full-screen overlay over the diff content.
+              Kept mounted (hidden) while a plan exists so the in-tab plan
+              position survives plan <-> diff toggling. */}
+          {walkthroughPayload && (
+            <div className={`absolute inset-0 z-30 ${isPlanMode ? '' : 'hidden'}`}>
+              <PlanView
+                payload={walkthroughPayload}
+                context={{
+                  files: diffData.files,
+                  diffMode,
+                  syntaxTheme: settings.syntaxTheme,
+                  baseCommitish: diffData.baseCommitish,
+                  targetCommitish: diffData.targetCommitish,
+                  threadsByFile,
+                  showAuthorBadges,
+                  staleRefs: walkthroughPayload.stale,
+                  onAddComment: handleAddComment,
+                  onGenerateThreadPrompt: handleGenerateThreadPrompt,
+                  onRemoveThread: removeThread,
+                  onReplyToThread: handleReplyToThread,
+                  onRemoveMessage: removeMessage,
+                  onUpdateMessage: updateMessage,
+                  onOpenInEditor: canOpenInEditor ? handleOpenInEditor : undefined,
+                  onOpenInFullDiff: handleOpenSnippetInDiff,
+                }}
+              />
+            </div>
+          )}
           <div
             className={`relative overflow-hidden ${!isDragging ? '!transition-all !duration-300 !ease-in-out' : ''}`}
             style={{

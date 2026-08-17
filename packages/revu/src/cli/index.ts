@@ -208,9 +208,14 @@ withTaskOptions(
   });
 review
   .command('list')
-  .description('list all known tasks')
-  .action(async () => {
-    printResult(await daemonRequest<{ tasks: TaskSummary[] }>('GET', '/api/review/list'));
+  .description('list known tasks (all repositories by default)')
+  .option('--repo <path>', 'only tasks of this repository')
+  .action(async (opts: { repo?: string }) => {
+    printResult(
+      await daemonRequest<{ tasks: TaskSummary[] }>('GET', '/api/review/list', {
+        query: { repoPath: opts.repo },
+      }),
+    );
   });
 
 // comment

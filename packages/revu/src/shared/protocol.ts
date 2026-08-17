@@ -34,6 +34,7 @@ export interface ReviewStartResponse {
 export interface TaskSummary {
   taskKey: string;
   repositoryId: string;
+  repoRoot: string;
   source: string;
   base: string;
   port: number;

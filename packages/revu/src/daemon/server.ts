@@ -116,8 +116,9 @@ export function createDaemonApp(registry: Registry, onShutdown: () => void): Exp
 
   app.get(
     '/api/review/list',
-    handler(async (_req, res) => {
-      res.json({ tasks: await registry.reviewList() });
+    handler(async (req, res) => {
+      const repoPath = typeof req.query.repoPath === 'string' ? req.query.repoPath : undefined;
+      res.json({ tasks: await registry.reviewList(repoPath) });
     }),
   );
 

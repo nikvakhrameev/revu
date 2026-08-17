@@ -169,6 +169,37 @@ importers:
         specifier: ^4.0.0
         version: 4.1.10(@types/node@24.13.3)(happy-dom@20.11.2)(vite@8.2.1(@types/node@24.13.3)(jiti@2.7.0)(yaml@2.9.0))
 
+  packages/revu:
+    dependencies:
+      '@revu/plan-schema':
+        specifier: workspace:*
+        version: link:../plan-schema
+      commander:
+        specifier: ^15.0.0
+        version: 15.0.0
+      difit:
+        specifier: workspace:*
+        version: link:../difit
+      express:
+        specifier: ^5.1.0
+        version: 5.2.1
+      zod:
+        specifier: ^4.1.0
+        version: 4.4.3
+    devDependencies:
+      '@types/express':
+        specifier: ^5.0.0
+        version: 5.0.6
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.0
+        version: 4.1.10(@types/node@24.13.3)(happy-dom@20.11.2)(vite@8.2.1(@types/node@24.13.3)(jiti@2.7.0)(yaml@2.9.0))
+
 packages:
 
   '@adobe/css-tools@4.5.0':

@@ -47,6 +47,15 @@ function parseJsonArg(raw: string, what: string): unknown {
   }
 }
 
+/** --since <n>: a generation cursor — a non-negative integer. */
+function parseSince(value: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) {
+    throw makeCliError('INVALID_ARGS', '--since must be a non-negative integer');
+  }
+  return n;
+}
+
 // ---------- daemon ----------
 
 async function daemonStatus(): Promise<{ pid: number; liveInstances: number } | null> {
@@ -158,17 +167,24 @@ withTaskOptions(
 )
   .option('--allow-dirty', 'skip the dirty-worktree guard')
   .option('--open', 'open the browser')
-  .action(async (opts: TaskFlags & { allowDirty?: boolean; open?: boolean }) => {
+  .option(
+    '--since <n>',
+    'generation cursor: validate fail-fast at start, return only feedback stamped above it',
+    parseSince,
+  )
+  .action(async (opts: TaskFlags & { allowDirty?: boolean; open?: boolean; since?: number }) => {
     const params = taskParams(opts);
     const started = await daemonRequest<ReviewStartResponse>('POST', '/api/review/start', {
-      body: { ...params, allowDirty: opts.allowDirty, open: opts.open },
+      body: { ...params, allowDirty: opts.allowDirty, open: opts.open, since: opts.since },
       timeoutMs: 120_000,
     });
     console.error(
       `Review ${started.reused ? 'reused' : started.restarted ? 'restarted' : 'started'} at ${started.url} — waiting for the user to press "Finish review"...`,
     );
     await reviewWaitLoop(params);
-    const comments = await daemonRequest('GET', '/api/comment/get', { query: params });
+    const comments = await daemonRequest('GET', '/api/comment/get', {
+      query: { ...params, since: opts.since },
+    });
     printResult({ status: 'finished', ...(comments as object) });
   });
 withTaskOptions(review.command('start').description('start (or reuse) the review instance'))
@@ -247,9 +263,19 @@ withTaskOptions(
 });
 withTaskOptions(
   comment.command('get').description('current + resolved threads from the daemon store'),
-).action(async (opts: TaskFlags) => {
-  printResult(await daemonRequest('GET', '/api/comment/get', { query: taskParams(opts) }));
-});
+)
+  .option(
+    '--since <n>',
+    'generation cursor: only threads/resolved entries stamped above it (omit for the full state)',
+    parseSince,
+  )
+  .action(async (opts: TaskFlags & { since?: number }) => {
+    printResult(
+      await daemonRequest('GET', '/api/comment/get', {
+        query: { ...taskParams(opts), since: opts.since },
+      }),
+    );
+  });
 
 // plan
 const plan = program.command('plan').description('walkthrough plan');

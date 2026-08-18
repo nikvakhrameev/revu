@@ -242,16 +242,22 @@ export interface RemovableThread {
   messages: Array<{ id: string }>;
 }
 
-export interface StoreRemovalInput<T extends RemovableThread> {
+export interface StoreRemovalInput<
+  T extends RemovableThread,
+  R extends { thread: T } = { thread: T; resolvedAt: string },
+> {
   /** Threads from the last snapshot (threads.json). */
   threads: T[];
   /** Raw comment imports still queued for the next instance (staging.json). */
   staging: unknown[];
   /** Archived threads resolved in the UI (resolved.json). */
-  resolved: Array<{ thread: T; resolvedAt: string }>;
+  resolved: R[];
 }
 
-export interface StoreRemovalResult<T extends RemovableThread> extends StoreRemovalInput<T> {
+export interface StoreRemovalResult<
+  T extends RemovableThread,
+  R extends { thread: T } = { thread: T; resolvedAt: string },
+> extends StoreRemovalInput<T, R> {
   removedThreads: string[];
   removedMessages: string[];
   removedStaged: string[];
@@ -269,10 +275,10 @@ export interface StoreRemovalResult<T extends RemovableThread> extends StoreRemo
  * messages goes away with its last message. Ids that match nothing come back
  * as `notFound` — removal is idempotent, not an error.
  */
-export function applyStoreRemovals<T extends RemovableThread>(
-  input: StoreRemovalInput<T>,
+export function applyStoreRemovals<T extends RemovableThread, R extends { thread: T }>(
+  input: StoreRemovalInput<T, R>,
   ids: string[],
-): StoreRemovalResult<T> {
+): StoreRemovalResult<T, R> {
   const unique = [...new Set(ids)];
   const wanted = new Set(unique);
   const removedThreads: string[] = [];

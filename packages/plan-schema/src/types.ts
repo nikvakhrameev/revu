@@ -87,6 +87,7 @@ export type RevuErrorCode =
   | 'GIT_ERROR'
   | 'GLAB_ERROR'
   | 'INVALID_ARGS'
+  | 'CURSOR_INVALID'
   | 'INTERNAL';
 
 export interface RevuError {

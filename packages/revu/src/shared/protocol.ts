@@ -17,6 +17,8 @@ export interface TaskRef {
 export interface ReviewStartRequest extends TaskRef {
   allowDirty?: boolean;
   open?: boolean;
+  /** Generation cursor validated fail-fast (CURSOR_INVALID) before launching. */
+  since?: number;
 }
 
 export interface ReviewStartResponse {
@@ -29,6 +31,8 @@ export interface ReviewStartResponse {
   restarted: boolean;
   baseSha: string;
   targetSha: string;
+  /** Task generation after launch completes (post injection/drain) — the review baseline. */
+  generation: number;
 }
 
 export interface TaskSummary {
@@ -61,6 +65,30 @@ export interface CommentRemoveResponse {
   removedStaged: string[];
   removedResolved: string[];
   notFound: string[];
+  /** Task generation after the removal (bumped only when something was removed). */
+  generation: number;
+}
+
+/** POST /api/comment/add — the live path spreads difit's import result. */
+export interface CommentAddResponse {
+  /** Live path: generation stamped onto the batch (N+1 under attribution).
+   *  Staged path: the current, unbumped generation (bump happens at drain). */
+  generation: number;
+  /** Present (true) when the instance was down and the batch was staged. */
+  staged?: boolean;
+  count?: number;
+  [key: string]: unknown;
+}
+
+/** GET /api/comment/get — full state, or a delta of items stamped > `since`.
+ *  Delta threads are returned whole, identical in shape to the full response. */
+export interface CommentGetResponse {
+  threads: unknown[];
+  capturedAt: string | null;
+  headSha: string | null;
+  resolved: unknown[];
+  /** Current task generation — the client's next cursor. */
+  generation: number;
 }
 
 export interface PlanSetRequest extends TaskRef {
@@ -93,5 +121,6 @@ export const ERROR_EXIT_CODES: Record<RevuErrorCode, number> = {
   GIT_ERROR: 10,
   GLAB_ERROR: 11,
   COMMENT_VALIDATION_FAILED: 12,
+  CURSOR_INVALID: 13,
   INTERNAL: 1,
 };

@@ -32,7 +32,8 @@ function sendError(res: Response, e: unknown): void {
           ? 400
           : e.code === 'PLAN_VALIDATION_FAILED' || e.code === 'COMMENT_VALIDATION_FAILED'
             ? 422
-            : 409;
+            : // CURSOR_INVALID, DIRTY_WORKTREE, PORT_TAKEN, INSTANCE_NOT_RUNNING, ...
+              409;
     res.status(status).json(revuError(e.code, e.message, e.details));
     return;
   }
@@ -74,6 +75,7 @@ export function createDaemonApp(registry: Registry, onShutdown: () => void): Exp
       const result = await registry.reviewStart(taskRefFromBody(body), {
         allowDirty: body.allowDirty === true,
         open: body.open === true,
+        since: typeof body.since === 'number' ? body.since : undefined,
       });
       res.json(result);
     }),
@@ -145,7 +147,13 @@ export function createDaemonApp(registry: Registry, onShutdown: () => void): Exp
   app.get(
     '/api/comment/get',
     handler(async (req, res) => {
-      res.json(await registry.commentGet(taskRefFromQuery(req.query as Record<string, unknown>)));
+      const since =
+        typeof req.query.since === 'string' && req.query.since !== ''
+          ? Number(req.query.since)
+          : undefined;
+      res.json(
+        await registry.commentGet(taskRefFromQuery(req.query as Record<string, unknown>), since),
+      );
     }),
   );
 

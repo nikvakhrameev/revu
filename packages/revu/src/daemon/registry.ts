@@ -20,6 +20,7 @@ import {
   resolveDefaultBase,
   revParse,
 } from './git.js';
+import { filterByStamp, isCursorAhead, stampSnapshot } from './generations.js';
 import {
   getInstanceInfo,
   isOurInstance,
@@ -39,6 +40,8 @@ import {
 import { InstanceWatcher } from './watcher.js';
 import {
   DEFAULT_INSTANCE_PORTS,
+  type CommentAddResponse,
+  type CommentGetResponse,
   type CommentRemoveResponse,
   type ReviewStartResponse,
   type StaleReportEntry,
@@ -57,7 +60,8 @@ export class TaskError extends Error {
       | 'COMMENT_VALIDATION_FAILED'
       | 'PLAN_NOT_FOUND'
       | 'GIT_ERROR'
-      | 'INVALID_ARGS',
+      | 'INVALID_ARGS'
+      | 'CURSOR_INVALID',
     message: string,
     readonly details?: unknown,
   ) {
@@ -166,11 +170,31 @@ export class Registry {
 
   // ---------- Review lifecycle ----------
 
+  /** since must be an existing generation; a cursor from a wiped/recreated
+   *  task state fails loudly instead of producing a silent empty delta. */
+  private validateCursor(since: number | undefined, generation: number): void {
+    if (since === undefined) return;
+    if (!Number.isInteger(since) || since < 0) {
+      throw new TaskError('INVALID_ARGS', 'since must be a non-negative integer');
+    }
+    if (isCursorAhead(since, generation)) {
+      throw new TaskError(
+        'CURSOR_INVALID',
+        `Cursor ${since} is ahead of the current generation ${generation}; the task state was likely recreated. Retry without --since and process the full state.`,
+        { since, generation },
+      );
+    }
+  }
+
   async reviewStart(
     ref: TaskRef,
-    opts: { allowDirty?: boolean; open?: boolean },
+    opts: { allowDirty?: boolean; open?: boolean; since?: number },
   ): Promise<ReviewStartResponse> {
     const t = await this.resolveTask(ref);
+    // Fail-fast for `review run --since`: reject a stale cursor before
+    // launching and blocking on the user. The counter is monotonic, so a
+    // cursor valid here cannot become invalid by Finish.
+    this.validateCursor(opts.since, t.store.getMeta()?.generation ?? 0);
     const revisions = await this.resolveRevisions(t);
     const existingLive = this.live.get(t.taskKeyHash);
     const meta = t.store.getMeta();
@@ -231,6 +255,9 @@ export class Registry {
       restarted: flags.restarted ?? false,
       baseSha: revisions.baseSha,
       targetSha: revisions.targetSha,
+      // Measured after launch completes (launch awaits the pending snapshot
+      // chain), so the baseline sits above the agent's own drained comments.
+      generation: t.store.getMeta()?.generation ?? 0,
     };
   }
 
@@ -273,6 +300,7 @@ export class Registry {
       baseSha: revisions.baseSha,
       targetSha: revisions.targetSha,
       status: 'running',
+      generation: prevMeta?.generation ?? 0,
       createdAt: prevMeta?.createdAt ?? now,
       updatedAt: now,
     };
@@ -285,6 +313,10 @@ export class Registry {
     await this.injectThreads(liveTask);
     await this.drainStaging(liveTask);
     await this.pushPlan(liveTask, revisions);
+    // Settle the pending snapshot chain (the drain's bump in particular) so
+    // callers read a post-launch generation. The re-injection snapshot diffs
+    // empty by the projection and never bumps.
+    await liveTask.snapshotChain;
     return { port };
   }
 
@@ -341,10 +373,31 @@ export class Registry {
   // ---------- Threads: snapshots, injection, staging ----------
 
   private queueSnapshot(live: LiveTask): void {
-    live.snapshotChain = live.snapshotChain.then(() => this.snapshot(live)).catch(() => {});
+    void this.chainSnapshot(live).catch(() => {});
   }
 
-  private async snapshot(live: LiveTask): Promise<void> {
+  /** Serializes an ordinary (no-attribution) snapshot through the chain.
+   *  Agent batches must NOT go through here: commentAdd runs its import and
+   *  batch snapshot as one chain link so SSE snapshots cannot interleave. */
+  private chainSnapshot(live: LiveTask): Promise<number> {
+    const run = live.snapshotChain.then(() => this.snapshot(live));
+    live.snapshotChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /**
+   * Pull the instance's threads, diff them against threads.json by the
+   * normalized projection and stamp generations: unchanged threads carry
+   * their previous stamp forward, changed/new ones get a fresh bump.
+   * `batchIds` (agent `comment add`) splits the diff into N+1 (the batch's
+   * own writes) and N+2 (concurrent foreign changes) per the attribution
+   * rule. Disappeared threads move to resolved.json stamped with the bump
+   * generation. meta.generation moves only when the diff is non-empty.
+   */
+  private async snapshot(live: LiveTask, batchIds?: ReadonlySet<string>): Promise<number> {
     const res = await fetch(
       `http://localhost:${live.port}/api/comments-json?${this.sessionQuery(live)}`,
       { signal: AbortSignal.timeout(5000) },
@@ -355,6 +408,13 @@ export class Registry {
     const prev = store.getThreads();
     const meta = store.getMeta();
 
+    const outcome = stampSnapshot(
+      prev?.threads ?? [],
+      data.threads,
+      meta?.generation ?? 0,
+      batchIds,
+    );
+
     // Threads that disappeared since the previous snapshot were resolved in the UI.
     if (prev) {
       const nextIds = new Set(data.threads.map((th) => th.id));
@@ -363,7 +423,7 @@ export class Registry {
         const resolved = store.getResolved();
         const now = new Date().toISOString();
         for (const th of disappeared) {
-          resolved.threads.push({ thread: th, resolvedAt: now });
+          resolved.threads.push({ thread: th, resolvedAt: now, generation: outcome.resolvedStamp });
         }
         store.setResolved(resolved);
         const sync = store.getSync();
@@ -382,10 +442,14 @@ export class Registry {
     store.setThreads({
       schemaVersion: 1,
       version: data.version,
-      threads: data.threads,
+      threads: outcome.threads,
       capturedAt: new Date().toISOString(),
       headSha: meta?.targetSha ?? '',
     });
+    if (outcome.bumped && meta) {
+      store.setMeta({ ...meta, generation: outcome.generation });
+    }
+    return outcome.batchGeneration;
   }
 
   private threadsToImports(threads: StoredThread[]): unknown[] {
@@ -628,7 +692,7 @@ export class Registry {
     };
   }
 
-  async commentAdd(ref: TaskRef, imports: unknown[]): Promise<unknown> {
+  async commentAdd(ref: TaskRef, imports: unknown[]): Promise<CommentAddResponse> {
     const t = await this.resolveTask(ref);
     const revisions = await this.pinnedRevisions(t);
     const ctx = this.commentContext(t, revisions);
@@ -644,15 +708,44 @@ export class Registry {
 
     const live = this.live.get(t.taskKeyHash);
     if (live && isPidAlive(live.pid)) {
-      const posted = await this.postImports(live, enriched);
-      this.queueSnapshot(live);
-      return posted;
+      // Batch ids drive attribution: difit keys the new threads/replies by
+      // these ids, so the snapshot can split its diff into "mine" (N+1,
+      // returned here) and concurrent foreign changes (N+2, left above the
+      // agent's cursor).
+      const batchIds = new Set<string>();
+      for (const entry of enriched) {
+        if (typeof entry === 'object' && entry !== null) {
+          const id = (entry as { id?: unknown }).id;
+          if (typeof id === 'string') batchIds.add(id);
+        }
+      }
+      // difit broadcasts commentsChanged over SSE before it answers the
+      // import POST, so the watcher's ordinary snapshot would otherwise chain
+      // ahead of the batch snapshot, consume the batch's diff in one shared
+      // bump and bypass the N+1/N+2 attribution split — stamping a concurrent
+      // foreign change AT the cursor returned here. Import and batch snapshot
+      // therefore run as ONE chain link, with the chain reassigned
+      // synchronously before any await (the commentRemove pattern), so an
+      // SSE-triggered snapshot can only chain after the batch snapshot.
+      const run = live.snapshotChain.then(async () => {
+        const posted = await this.postImports(live, enriched);
+        const generation = await this.snapshot(live, batchIds);
+        return { posted, generation };
+      });
+      live.snapshotChain = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      const { posted, generation } = await run;
+      return { ...(posted as Record<string, unknown>), generation };
     }
-    // Dead instance: stage for the next review start.
+    // Dead instance: stage for the next review start. The generation is the
+    // current, unbumped one — the bump happens at drain time (self-echo into
+    // older cursors is accepted; author classification filters it).
     const staging = t.store.getStaging();
     staging.imports.push(...enriched);
     t.store.setStaging(staging);
-    return { staged: true, count: enriched.length };
+    return { staged: true, count: enriched.length, generation: t.store.getMeta()?.generation ?? 0 };
   }
 
   /** Removal inside the live instance; the UI drops the comments immediately. */
@@ -692,9 +785,9 @@ export class Registry {
     const threadsFile = store.getThreads();
     const staging = store.getStaging();
     const resolvedFile = store.getResolved();
-    const result = applyStoreRemovals<StoredThread>(
+    const result = applyStoreRemovals(
       {
-        threads: threadsFile?.threads ?? [],
+        threads: (threadsFile?.threads ?? []) as StoredThread[],
         staging: staging.imports,
         resolved: resolvedFile.threads,
       },
@@ -722,12 +815,22 @@ export class Registry {
       ...result.removedStaged,
       ...result.removedResolved,
     ]);
+
+    // Removal is a substantive change: bump once per actual removal. The
+    // removed items vanish, so there is nothing left to stamp.
+    const meta = store.getMeta();
+    let generation = meta?.generation ?? 0;
+    if (removed.size > 0 && meta) {
+      generation += 1;
+      store.setMeta({ ...meta, generation });
+    }
     return {
       removedThreads,
       removedMessages,
       removedStaged: result.removedStaged,
       removedResolved: result.removedResolved,
       notFound: [...new Set(ids)].filter((id) => !removed.has(id)),
+      generation,
     };
   }
 
@@ -768,18 +871,26 @@ export class Registry {
     return result;
   }
 
-  async commentGet(ref: TaskRef): Promise<unknown> {
+  /** Without `since`: the full state. With it: a delta of items stamped
+   *  strictly above the cursor — threads returned whole, identical in shape
+   *  to the full response. */
+  async commentGet(ref: TaskRef, since?: number): Promise<CommentGetResponse> {
     const t = await this.resolveTask(ref);
     const threads = t.store.getThreads();
     const resolved = t.store.getResolved();
-    if (!threads && resolved.threads.length === 0 && !t.store.getMeta()) {
+    const meta = t.store.getMeta();
+    if (!threads && resolved.threads.length === 0 && !meta) {
       throw new TaskError('TASK_NOT_FOUND', 'No such task');
     }
+    const generation = meta?.generation ?? 0;
+    this.validateCursor(since, generation);
+    const allThreads = threads?.threads ?? [];
     return {
-      threads: threads?.threads ?? [],
+      threads: since === undefined ? allThreads : filterByStamp(allThreads, since),
       capturedAt: threads?.capturedAt ?? null,
       headSha: threads?.headSha ?? null,
-      resolved: resolved.threads,
+      resolved: since === undefined ? resolved.threads : filterByStamp(resolved.threads, since),
+      generation,
     };
   }
 

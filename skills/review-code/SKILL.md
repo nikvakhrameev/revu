@@ -75,9 +75,11 @@ Validation is two-phase: structural errors (envelope, ids, links, ref syntax) co
 4. **Show it to the user:**
 
 - Fire-and-forget: `revu review start --open` — opens the browser, you are done; report a short summary of the findings in chat. Omit `--open` in headless/unattended runs (the instance still starts; the response JSON contains the `url` to hand to the user).
-- If the user should reply in the UI and you must wait: `revu review run --open` — blocks until the user presses **Finish review**, then prints the final thread state as JSON on stdout. **A message is yours only if it carries the `author` you set; anything else is the user's** (the difit UI currently stamps `"author": "User"`, but do not rely on that exact value). Threads whose last message is not yours need a response; `resolved` threads are closed by the user; Finish with no new user messages means no follow-up requested. When you act on feedback, reply into the thread (`"type":"reply"`, your `author`, same file/position) so the user sees the outcome and handled threads are marked by your last message.
+- If the user should reply in the UI and you must wait: `revu review run --open` — blocks until the user presses **Finish review**, then prints the final thread state as JSON on stdout. **A message is yours only if it carries the `author` you set; anything else is the user's** (the difit UI currently stamps `"author": "User"`, but do not rely on that exact value). Threads whose last message is not yours need a response; `resolved` threads are closed by the user; an empty delta after Finish (or, without `--since`, no new user messages) means no follow-up requested. When you act on feedback, reply into the thread (`"type":"reply"`, your `author`, same file/position) so the user sees the outcome and handled threads are marked by your last message.
 
 5. **Verify delivery (optional):** `revu comment get` and `revu plan get` read back exactly what was stored; `revu review list --repo .` shows this repository's tasks.
+
+   Responses of `review start/run` and `comment add/remove/get` include the task's monotonic `generation` counter; `revu review run --since <N>` / `revu comment get --since <N>` return only feedback stamped after that cursor (threads come whole, same shape as the full response). On `CURSOR_INVALID` (exit 13), retry without `--since` and process the full state.
 
 6. Later sessions: `revu comment get` returns the persisted threads (including resolved history) for this task — use it to see what the user answered or closed.
 

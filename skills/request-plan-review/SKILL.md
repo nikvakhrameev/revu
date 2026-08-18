@@ -46,7 +46,7 @@ Follow `request-review` for the mechanics; shape the content like this:
   - Route the pages by decision area, e.g.: data/format decisions → new API surface → wiring in callers → **open questions**.
   - The **open questions** page lists the decisions you need from the user, each with your proposed default and the alternative. This page is the review's agenda.
 - **Anchored comments**: one thread per decision point, anchored to the doc comment or signature that embodies it. Phrase each as a decision to confirm — state what you chose, the alternative you rejected, and why. Give threads stable ids like `agent-plan-<decision>`.
-- Then run the blocking review (`revu review run --open`) and wait for Finish.
+- Then run the blocking review (`revu review run --open`) and wait for Finish. On later rounds pass `--since <generation>` (the cursor from the previous round's response) to receive only new feedback; on `CURSOR_INVALID` (exit 13), retry without `--since` and process the full state.
 
 ## Iterating on decisions
 
@@ -56,11 +56,11 @@ When Finish brings back decision changes:
 2. Update the walkthrough plan: mark settled items on the open-questions page as resolved (keep them visible — they document the agreement), describe the new/changed parts, refresh snippet line ranges (`revu plan check` shows what went stale), bump the title (v2, v3...).
 3. Reply into every user thread you acted on, stating what changed.
 4. Add new threads on sketch code that appeared in the rework.
-5. Run the review again. Repeat until Finish comes back with no new user messages.
+5. Run the review again. Repeat until Finish comes back with an empty delta — no new user feedback.
 
 ## After approval
 
-Finish with no new user feedback = the plan is agreed. Implement for real, replacing the stubs; the agreed doc comments stay as the behaviour contract, and the open-questions page records what was decided.
+An empty delta at Finish (no new user feedback) = the plan is agreed. Implement for real, replacing the stubs; the agreed doc comments stay as the behaviour contract, and the open-questions page records what was decided.
 
 **Give the implementation review a clean slate.** Review state (threads, walkthrough plan) sticks to the task key — repo + source branch + base branch. Rerunning the review on the sketch branch would re-inject every planning thread into the implementation review, but the reviewer wants only implementation comments there. Start a fresh task instead — either:
 

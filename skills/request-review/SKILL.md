@@ -23,21 +23,30 @@ Key facts:
 4. Run the blocking review command:
 
 ```bash
-revu review run --open
+revu review run --open                 # first round: full state
+revu review run --open --since <N>     # later rounds: only feedback newer than your cursor
 ```
 
 This starts (or reuses) a difit instance for the current branch, opens the browser for the user, and blocks until the user presses the **Finish review** button in the UI. Progress (including the instance URL) goes to stderr; the final result is JSON on stdout:
 
 ```json
-{"status": "finished", "threads": [...], "resolved": [...], "capturedAt": "...", "headSha": "..."}
+{"status": "finished", "threads": [...], "capturedAt": "...", "headSha": "...", "resolved": [...], "generation": 7}
 ```
+
+**Cursor discipline (`generation` / `--since`).** Every task has a monotonic `generation` counter of its comment state, and every response that matters hands you the current value — use it as your cursor to avoid re-reading feedback you already processed:
+
+- `revu review start` returns the baseline `generation` ("everything from this moment on"); `revu comment add` returns the generation covering your own batch, `revu comment remove` the post-removal one — advance your cursor to whatever the latest command returned.
+- `revu review run --since <cursor>` (and `revu comment get --since <cursor>`) return only threads/resolved entries changed **after** the cursor; each returned thread comes whole (all messages) and each newly-resolved entry is the full record — same shapes as the full response, so the classification rule is unchanged. Your own writes sit at your cursor and are not echoed back.
+- An empty delta (`{"threads": [], "resolved": [], "generation": N}`) after Finish means **"no review findings" — do not restart the review**.
+- `CURSOR_INVALID` (exit 13) means your cursor is from a former life of the task (state wiped/recreated): retry without `--since` and process the full state. `review run` validates the cursor fail-fast at start, before the user begins reviewing.
+- Omitting `--since` always returns the unconditional full state (`--since 0` is not the same: it excludes items that predate the counter).
 
 In headless/unattended runs omit `--open`; hand the user the URL from the progress line or from `revu review list --repo .`.
 
 5. Interpret the result. **Classification rule: a message is yours only if it carries the `author` value you set when adding it (e.g. `"agent"`). Everything else is the user's** — the difit UI currently stamps its messages with `"author": "User"`, but do not rely on that exact value; treat any message whose `author` is not yours (or is missing) as user feedback.
    - A thread needs your attention when its **last message is not yours** — a reply in one of your threads, or a brand-new user thread.
    - `resolved` lists threads the user closed — treat them as accepted/done, no action needed.
-   - **Finish with no new user messages means "no review findings". Do not restart the review.**
+   - **An empty delta after Finish means "no review findings". Do not restart the review.** (Without `--since`, the same signal is a full state with no new user messages.)
 
    Example of a Finish with feedback — the user replied to your thread (second message, author is not yours):
 
@@ -47,12 +56,12 @@ In headless/unattended runs omit `--open`; hand the user the URL from the progre
   "messages":[
     {"id":"agent-note-1","body":"This implements the retry logic.","author":"agent","createdAt":"..."},
     {"id":"x8k2...","body":"Please also handle negative values here.","author":"User","createdAt":"..."}]}],
- "resolved":[]}
+ "resolved":[],"generation":8}
 ```
 
-6. Address the feedback, then **reply into every user thread you acted on** (`"type":"reply"`, your `author`, same file/position — see "Adding comments") stating what you did. This is both the confirmation the user sees in the UI and the marker that keeps rounds apart: on the next Finish, threads whose last message is yours are already handled.
+6. Address the feedback, then **reply into every user thread you acted on** (`"type":"reply"`, your `author`, same file/position — see "Adding comments") stating what you did. This is both the confirmation the user sees in the UI and the marker that keeps rounds apart: on the next Finish, threads whose last message is yours are already handled. Each such `comment add` returns a fresh `generation` — keep your cursor at the latest one.
 7. If you set a walkthrough plan, refresh it: `revu plan check` → update the stale pages → `revu plan set`. Otherwise the user sees "code changed" placeholders instead of snippets on the next round.
-8. Commit the fixes and run `revu review run --open` again. The instance restarts on the new head; previous threads are re-injected automatically (threads whose code changed get an "outdated" badge), nothing is lost. After Finish the instance stops — the old URL goes dead until the next start.
+8. Commit the fixes and run `revu review run --open --since <cursor>` again. The instance restarts on the new head; previous threads are re-injected automatically (threads whose code changed get an "outdated" badge), nothing is lost. After Finish the instance stops — the old URL goes dead until the next start.
 
 Non-blocking primitives exist too: `revu review start`, `revu review wait`, `revu review stop`, `revu review refresh`, `revu review list` — same cycle, split into steps.
 
@@ -70,10 +79,10 @@ revu comment add '{"type":"thread","id":"agent-retry-note","author":"agent","fil
 - `position.side`: `"new"` for lines on the target side of the diff, `"old"` for deleted lines.
 - `position.line`: a number or `{"start": N, "end": M}` for ranges.
 - Anchors are validated against git (file exists on that side, lines within bounds; a reply must match an existing thread's file/position). A bad batch is rejected whole with `COMMENT_VALIDATION_FAILED` and machine-readable `details` — fix the named imports and retry. Still take paths and line numbers from the actual diff output, not from memory.
-- Remove your own mistaken or obsolete comments with `revu comment remove <id...>` (works on live and stopped instances; this is removal, not resolution — resolving is the user's).
+- Remove your own mistaken or obsolete comments with `revu comment remove <id...>` (works on live and stopped instances; the response includes the post-removal `generation`; this is removal, not resolution — resolving is the user's).
 - Write comment bodies in the language the user is using.
-- Works whether or not the instance is running: with a live instance the comment appears immediately (`{"success": true, ...}`), otherwise it is staged and injected on the next start (`{"staged": true, ...}`).
-- Read the full thread state (including the user's replies and resolved history) with `revu comment get`.
+- Works whether or not the instance is running: with a live instance the comment appears immediately (`{"success": true, ..., "generation": N}` — N is your new cursor), otherwise it is staged and injected on the next start (`{"staged": true, ..., "generation": <current>}` — the counter bumps at injection, so an older cursor may see your own staged comments echoed in a later delta; the author classification rule filters them).
+- Read the full thread state (including the user's replies and resolved history) with `revu comment get`, or just the changes after your cursor with `revu comment get --since <N>`.
 - **Never copy secrets, tokens, passwords, API keys, private keys, or other credential-like material from the diff into comment bodies or command-line arguments.**
 
 ## Walkthrough plan
@@ -120,7 +129,7 @@ Prefer piping the plan via stdin (`revu plan set -`) — no file needed; if you 
 
 ## Error handling
 
-Errors are JSON on stderr: `{"error": {"code", "message", "details?"}}` with distinct exit codes. Common ones: `DIRTY_WORKTREE` (exit 6 — commit first, or pass `--allow-dirty` only if the user explicitly asks), `DAEMON_UNREACHABLE` (exit 3 — ask the user to run `revu daemon up`), `PLAN_VALIDATION_FAILED` (exit 8) and `COMMENT_VALIDATION_FAILED` (exit 12) — fix the named entries from `details` and retry, `TASK_NOT_FOUND` (exit 4 — run `revu review start` first), `GIT_ERROR` (exit 10 — e.g. not a git repository). Exit 0 = success.
+Errors are JSON on stderr: `{"error": {"code", "message", "details?"}}` with distinct exit codes. Common ones: `DIRTY_WORKTREE` (exit 6 — commit first, or pass `--allow-dirty` only if the user explicitly asks), `DAEMON_UNREACHABLE` (exit 3 — ask the user to run `revu daemon up`), `PLAN_VALIDATION_FAILED` (exit 8) and `COMMENT_VALIDATION_FAILED` (exit 12) — fix the named entries from `details` and retry, `TASK_NOT_FOUND` (exit 4 — run `revu review start` first), `GIT_ERROR` (exit 10 — e.g. not a git repository), `CURSOR_INVALID` (exit 13 — your `--since` cursor is ahead of the task's counter, i.e. from a former life of the task: retry without `--since` and process the full state). Exit 0 = success.
 
 ## Constraints
 
